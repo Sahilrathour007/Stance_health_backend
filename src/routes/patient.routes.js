@@ -6,6 +6,8 @@ const checkInController = require('../controllers/checkins.controller');
 
 const router = express.Router();
 
+router.get('/', requireAuth, asyncHandler(patientController.listPatients));
+router.get('/me', requireAuth, asyncHandler(patientController.getMyPatient));
 router.get('/:id', requireAuth, asyncHandler(patientController.getPatient));
 router.put('/:id', requireAuth, asyncHandler(patientController.updatePatient));
 router.get('/:id/check-ins', requireAuth, asyncHandler(checkInController.listPatientCheckIns));

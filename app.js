@@ -9,24 +9,35 @@ const patientRoutes = require('./src/routes/patient.routes');
 const appointmentRoutes = require('./src/routes/appointments.routes');
 const treatmentPlanRoutes = require('./src/routes/treatmentPlans.routes');
 const notificationRoutes = require('./src/routes/notifications.routes');
+const publicRoutes = require('./src/routes/public.routes');
 
 const app = express();
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+const corsOrigin = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
+  : '*';
+
+app.use(cors({ origin: corsOrigin }));
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'stance-health-backend' });
 });
 
-app.use('/auth', authRoutes);
-app.use('/onboarding', onboardingRoutes);
-app.use('/check-ins', checkInRoutes);
-app.use('/doctor', doctorRoutes);
-app.use('/patients', patientRoutes);
-app.use('/appointments', appointmentRoutes);
-app.use('/treatment-plans', treatmentPlanRoutes);
-app.use('/notifications', notificationRoutes);
+function registerApiRoutes(prefix = '') {
+  app.use(`${prefix}/public`, publicRoutes);
+  app.use(`${prefix}/auth`, authRoutes);
+  app.use(`${prefix}/onboarding`, onboardingRoutes);
+  app.use(`${prefix}/check-ins`, checkInRoutes);
+  app.use(`${prefix}/doctor`, doctorRoutes);
+  app.use(`${prefix}/patients`, patientRoutes);
+  app.use(`${prefix}/appointments`, appointmentRoutes);
+  app.use(`${prefix}/treatment-plans`, treatmentPlanRoutes);
+  app.use(`${prefix}/notifications`, notificationRoutes);
+}
+
+registerApiRoutes();
+registerApiRoutes('/api');
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found', path: req.originalUrl });

@@ -13,25 +13,41 @@ const registerSchema = z.object({
 
 async function register(req, res) {
   const body = registerSchema.parse(req.body);
+  let createdNewAuthUser = false;
 
-  const { data: created, error: createError } = await adminClient.auth.admin.createUser({
+  let { data: created, error: createError } = await adminClient.auth.admin.createUser({
     email: body.email,
     password: body.password,
     email_confirm: true,
     user_metadata: { name: body.name, role: body.role }
   });
+  if (!createError) createdNewAuthUser = true;
+  if (createError && String(createError.message).toLowerCase().includes('already')) {
+    const { data: listed, error: listError } = await adminClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    if (listError) throw httpError(400, createError.message, createError);
+    const existing = listed.users.find((user) => user.email?.toLowerCase() === body.email.toLowerCase());
+    if (!existing) throw httpError(400, createError.message, createError);
+    const { data: updated, error: updateError } = await adminClient.auth.admin.updateUserById(existing.id, {
+      password: body.password,
+      email_confirm: true,
+      user_metadata: { ...(existing.user_metadata || {}), name: body.name, role: body.role }
+    });
+    if (updateError) throw httpError(400, updateError.message, updateError);
+    created = { user: updated.user };
+    createError = null;
+  }
   if (createError) throw httpError(400, createError.message, createError);
 
   try {
     const { data: profile, error: profileError } = await adminClient
       .from('users')
-      .insert({
+      .upsert({
         id: created.user.id,
         name: body.name,
         email: body.email,
         phone: body.phone || null,
         role: body.role
-      })
+      }, { onConflict: 'id' })
       .select('*')
       .single();
     if (profileError) throw profileError;
@@ -40,11 +56,11 @@ async function register(req, res) {
     if (body.role === 'patient') {
       const { data, error } = await adminClient
         .from('patients')
-        .insert({
+        .upsert({
           user_id: created.user.id,
           status: 'onboarding',
           current_risk_level: 'low'
-        })
+        }, { onConflict: 'user_id' })
         .select('*')
         .single();
       if (error) throw error;
@@ -54,10 +70,10 @@ async function register(req, res) {
     if (body.role === 'doctor') {
       const { data, error } = await adminClient
         .from('doctors')
-        .insert({
+        .upsert({
           user_id: created.user.id,
           specialization: body.specialization || null
-        })
+        }, { onConflict: 'user_id' })
         .select('*')
         .single();
       if (error) throw error;
@@ -72,7 +88,7 @@ async function register(req, res) {
 
     res.status(201).json({ session: loginData.session, user: profile, roleProfile });
   } catch (err) {
-    await adminClient.auth.admin.deleteUser(created.user.id);
+    if (createdNewAuthUser) await adminClient.auth.admin.deleteUser(created.user.id);
     throw httpError(400, 'Unable to create public user profile', err);
   }
 }
