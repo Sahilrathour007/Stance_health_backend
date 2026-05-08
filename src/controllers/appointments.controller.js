@@ -13,6 +13,56 @@ const appointmentSchema = z.object({
   notes: z.string().optional()
 });
 
+function isMissingColumnError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return error?.code === '42703' || message.includes('column') && message.includes('does not exist');
+}
+
+function dedupeAppointments(rows) {
+  return Array.from(
+    new Map((rows || []).filter(Boolean).map(row => [row.id, row])).values()
+  ).sort((a, b) => {
+    const aKey = `${a.appointment_date || ''} ${a.appointment_time || ''}`;
+    const bKey = `${b.appointment_date || ''} ${b.appointment_time || ''}`;
+    return aKey.localeCompare(bKey);
+  });
+}
+
+async function loadPatientAppointments(patient, userProfile) {
+  const appointmentRows = [];
+
+  const { data: linkedRows, error: linkedError } = await adminClient
+    .from('appointments')
+    .select('*')
+    .eq('patient_id', patient.id)
+    .order('appointment_date', { ascending: true });
+  if (linkedError) throw httpError(500, 'Unable to load appointments', linkedError);
+  appointmentRows.push(...(linkedRows || []));
+
+  const contactFilters = [
+    ['patient_email', userProfile.email],
+    ['email', userProfile.email],
+    ['phone', userProfile.phone],
+    ['patient_phone', userProfile.phone]
+  ].filter(([, value]) => value);
+
+  for (const [column, value] of contactFilters) {
+    const { data, error } = await adminClient
+      .from('appointments')
+      .select('*')
+      .eq(column, value)
+      .order('appointment_date', { ascending: true });
+
+    if (error) {
+      if (isMissingColumnError(error)) continue;
+      throw httpError(500, 'Unable to load appointments by contact', error);
+    }
+    appointmentRows.push(...(data || []));
+  }
+
+  return dedupeAppointments(appointmentRows);
+}
+
 async function createAppointment(req, res) {
   const body = appointmentSchema.parse(req.body);
   const patient = await assertPatientAccess(req.userProfile, body.patient_id);
@@ -69,7 +119,8 @@ async function listAppointments(req, res) {
   if (req.userProfile.role === 'patient') {
     const patient = await getPatientForUser(req.userProfile.id);
     if (!patient) throw httpError(404, 'Patient profile not found');
-    query = query.eq('patient_id', patient.id);
+    const appointments = await loadPatientAppointments(patient, req.userProfile);
+    return res.json({ appointments });
   } else if (req.userProfile.role === 'doctor') {
     const doctor = await getDoctorForUser(req.userProfile.id);
     if (!doctor) throw httpError(404, 'Doctor profile not found');
