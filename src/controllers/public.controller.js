@@ -128,10 +128,18 @@ async function savePublicProfile(req, res) {
         email_confirm: true,
         user_metadata: { name, role: 'patient' }
       });
-      if (createError && !String(createError.message).toLowerCase().includes('already')) {
-        throw httpError(400, createError.message, createError);
+      if (createError) {
+        const msg = String(createError.message).toLowerCase();
+        if (!msg.includes('already registered') && !msg.includes('already been registered') && !msg.includes('already exists')) {
+          throw httpError(400, createError.message, createError);
+        }
+        // User already in auth.users — fetch their UUID so we can still create/link public.users
+        const { data: userList } = await adminClient.auth.admin.listUsers({ perPage: 1000 });
+        const found = (userList?.users || []).find(u => u.email === body.email);
+        authUserId = found?.id || null;
+      } else {
+        authUserId = created?.user?.id || null;
       }
-      authUserId = created?.user?.id || null;
     }
   }
 
@@ -147,11 +155,13 @@ async function savePublicProfile(req, res) {
 
   let user = existingPublicUser;
   if (authUserId) {
+    // Never allow name to be null — public.users has NOT NULL on name column
+    const safeName = name || body.email?.split('@')[0] || 'Patient';
     const { data, error } = await adminClient
       .from('users')
       .upsert({
         id: authUserId,
-        name,
+        name: safeName,
         email: body.email || null,
         phone: body.phone || null,
         role: 'patient',
@@ -163,8 +173,13 @@ async function savePublicProfile(req, res) {
     user = data;
   }
 
+  // Guard: if we still have no user.id, we cannot create a patient row with a valid FK
+  if (!user?.id) {
+    throw httpError(500, 'Failed to establish user identity — cannot create patient profile');
+  }
+
   const patientPayload = {
-    user_id: user?.id || null,
+    user_id: user.id,  // guaranteed non-null now
     age: body.age || null,
     occupation: body.activity_level || null,
     pain_location: body.primary_concern || null,
@@ -205,7 +220,21 @@ async function savePublicProfile(req, res) {
     .single();
   if (onboardingError) throw httpError(500, 'Unable to save onboarding', onboardingError);
 
-  res.status(201).json({ user, patient, onboarding });
+  // Generate a magic link so the patient can log into the portal immediately
+  let portalLink = null;
+  if (body.email) {
+    try {
+      const { data: linkData } = await adminClient.auth.admin.generateLink({
+        type: 'magiclink',
+        email: body.email
+      });
+      portalLink = linkData?.properties?.action_link || null;
+    } catch (_) {
+      // Non-fatal — portal link is a convenience, not a blocker
+    }
+  }
+
+  res.status(201).json({ user, patient, onboarding, portalLink });
 }
 
 async function createPublicAppointment(req, res) {
