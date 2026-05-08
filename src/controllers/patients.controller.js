@@ -29,19 +29,35 @@ async function getMyPatient(req, res) {
   const patient = await getPatientForUser(req.userProfile.id);
   if (!patient) throw httpError(404, 'Patient profile not found');
 
-  const [{ data: treatmentPlan, error: planError }, { data: appointments, error: appointmentError }, { data: checkIns, error: checkInError }] = await Promise.all([
+  const [
+    { data: treatmentPlan, error: planError },
+    { data: appointments, error: appointmentError },
+    { data: checkIns, error: checkInError },
+    { data: doctor, error: doctorError }
+  ] = await Promise.all([
     adminClient.from('treatment_plans').select('*').eq('patient_id', patient.id).maybeSingle(),
     adminClient.from('appointments').select('*').eq('patient_id', patient.id).order('appointment_date', { ascending: true }),
-    adminClient.from('check_ins').select('*').eq('patient_id', patient.id).order('submitted_at', { ascending: false }).limit(20)
+    adminClient.from('check_ins').select('*').eq('patient_id', patient.id).order('submitted_at', { ascending: false }).limit(20),
+    patient.assigned_doctor_id
+      ? adminClient.from('doctors').select('id, specialty, users(name,email,phone)').eq('id', patient.assigned_doctor_id).maybeSingle()
+      : Promise.resolve({ data: null, error: null })
   ]);
 
   if (planError) throw httpError(500, 'Unable to load treatment plan', planError);
   if (appointmentError) throw httpError(500, 'Unable to load appointments', appointmentError);
   if (checkInError) throw httpError(500, 'Unable to load check-ins', checkInError);
+  if (doctorError) throw httpError(500, 'Unable to load assigned doctor', doctorError);
 
   res.json({
     user: req.userProfile,
     patient,
+    doctor: doctor ? {
+      id: doctor.id,
+      name: doctor.users?.name || null,
+      email: doctor.users?.email || null,
+      phone: doctor.users?.phone || null,
+      specialty: doctor.specialty || null
+    } : null,
     treatmentPlan: treatmentPlan || null,
     appointments: appointments || [],
     upcomingAppointments: (appointments || []).filter(a => a.appointment_date >= new Date().toISOString().slice(0, 10)),
