@@ -27,7 +27,7 @@ async function createAppointment(req, res) {
       .eq('doctor_id', doctorId)
       .eq('appointment_date', body.appointment_date)
       .eq('appointment_time', body.appointment_time)
-      .in('status', ['scheduled', 'confirmed']);
+      .in('status', ['scheduled', 'confirmed', 'pending']);
     if (existingError) throw httpError(500, 'Unable to check appointment availability', existingError);
     if (existing && existing.length) throw httpError(409, 'This slot is already booked');
   }

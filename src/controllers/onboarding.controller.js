@@ -118,14 +118,7 @@ async function completeOnboarding(req, res) {
     .single();
   if (error) throw httpError(500, 'Unable to complete onboarding', error);
 
-  const { data: doctor } = await adminClient
-    .from('doctors')
-    .select('id')
-    .limit(1)
-    .maybeSingle();
-
   const patientUpdate = extractPatientUpdate(onboarding);
-  if (doctor && !patient.assigned_doctor_id) patientUpdate.assigned_doctor_id = doctor.id;
 
   const { data: updatedPatient, error: patientError } = await adminClient
     .from('patients')
