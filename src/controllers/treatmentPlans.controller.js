@@ -15,8 +15,10 @@ const planSchema = z.object({
 
 async function createTreatmentPlan(req, res) {
   const body = planSchema.parse(req.body);
-  const patient = await assertPatientAccess(req.userProfile, body.patient_id);
+  // Role check first — before any DB access — so patients can't probe other patient IDs
   if (req.userProfile.role === 'patient') throw httpError(403, 'Only doctors can create treatment plans');
+
+  const patient = await assertPatientAccess(req.userProfile, body.patient_id);
   const doctor = req.userProfile.role === 'doctor' ? await getDoctorForUser(req.userProfile.id) : null;
   if (req.userProfile.role === 'doctor' && !doctor) throw httpError(404, 'Doctor profile not found');
 
@@ -34,6 +36,9 @@ async function createTreatmentPlan(req, res) {
 }
 
 async function updateTreatmentPlan(req, res) {
+  // Role check first — before any DB access
+  if (req.userProfile.role === 'patient') throw httpError(403, 'Only doctors can update treatment plans');
+
   const { data: plan, error: loadError } = await adminClient
     .from('treatment_plans')
     .select('*')
@@ -41,7 +46,6 @@ async function updateTreatmentPlan(req, res) {
     .single();
   if (loadError) throw httpError(404, 'Treatment plan not found', loadError);
   await assertPatientAccess(req.userProfile, plan.patient_id);
-  if (req.userProfile.role === 'patient') throw httpError(403, 'Only doctors can update treatment plans');
 
   const allowed = ['exercises', 'goals', 'restrictions', 'start_date', 'end_date', 'status'];
   const update = {};

@@ -113,6 +113,7 @@ async function completeOnboarding(req, res) {
     .from('onboarding')
     .update({ is_complete: true, current_step: 6, completed_at: new Date().toISOString() })
     .eq('patient_id', patient.id)
+    .eq('is_complete', false)
     .select('*')
     .single();
   if (error) throw httpError(500, 'Unable to complete onboarding', error);

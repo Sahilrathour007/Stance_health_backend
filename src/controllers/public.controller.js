@@ -232,7 +232,7 @@ async function createPublicAppointment(req, res) {
       appointment_time: body.appointment_time || 'To be confirmed',
       duration_minutes: 30,
       type: appointmentType(body.appointment_type || body.program),
-      status: body.status === 'inquiry' ? 'scheduled' : 'scheduled',
+      status: body.status === 'inquiry' ? 'pending' : 'scheduled',
       notes: notes || null
     })
     .select('*')

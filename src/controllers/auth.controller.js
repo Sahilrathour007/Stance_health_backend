@@ -14,6 +14,7 @@ const registerSchema = z.object({
 async function register(req, res) {
   const body = registerSchema.parse(req.body);
   let createdNewAuthUser = false;
+  let authUserId = null;
 
   let { data: created, error: createError } = await adminClient.auth.admin.createUser({
     email: body.email,
@@ -21,21 +22,31 @@ async function register(req, res) {
     email_confirm: true,
     user_metadata: { name: body.name, role: body.role }
   });
-  if (!createError) createdNewAuthUser = true;
-  if (createError && String(createError.message).toLowerCase().includes('already')) {
+
+  if (!createError) {
+    createdNewAuthUser = true;
+    authUserId = created.user.id;
+  } else if (String(createError.message).toLowerCase().includes('already')) {
+    // User already exists in auth — find them and verify they have a matching profile.
+    // We do NOT silently update their password (security: anyone could hijack an account by re-registering).
     const { data: listed, error: listError } = await adminClient.auth.admin.listUsers({ page: 1, perPage: 1000 });
     if (listError) throw httpError(400, createError.message, createError);
-    const existing = listed.users.find((user) => user.email?.toLowerCase() === body.email.toLowerCase());
+    const existing = listed.users.find((u) => u.email?.toLowerCase() === body.email.toLowerCase());
     if (!existing) throw httpError(400, createError.message, createError);
-    const { data: updated, error: updateError } = await adminClient.auth.admin.updateUserById(existing.id, {
-      password: body.password,
-      email_confirm: true,
-      user_metadata: { ...(existing.user_metadata || {}), name: body.name, role: body.role }
-    });
-    if (updateError) throw httpError(400, updateError.message, updateError);
-    created = { user: updated.user };
+
+    // Check if a full profile already exists for this user
+    const { data: existingProfile } = await adminClient.from('users').select('id').eq('id', existing.id).maybeSingle();
+    if (existingProfile) {
+      // Account fully registered — require them to log in instead
+      throw httpError(409, 'An account with this email already exists. Please log in.');
+    }
+
+    // Auth user exists but no profile yet (partial registration) — safe to continue
+    authUserId = existing.id;
+    created = { user: existing };
     createError = null;
   }
+
   if (createError) throw httpError(400, createError.message, createError);
 
   try {
@@ -88,8 +99,8 @@ async function register(req, res) {
 
     res.status(201).json({ session: loginData.session, user: profile, roleProfile });
   } catch (err) {
-    if (createdNewAuthUser) await adminClient.auth.admin.deleteUser(created.user.id);
-    throw httpError(400, 'Unable to create public user profile', err);
+    if (createdNewAuthUser && authUserId) await adminClient.auth.admin.deleteUser(authUserId);
+    throw httpError(400, 'Unable to create user profile', err);
   }
 }
 

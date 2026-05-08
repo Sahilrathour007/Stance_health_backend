@@ -16,55 +16,66 @@ const appointmentSchema = z.object({
 async function createAppointment(req, res) {
   const body = appointmentSchema.parse(req.body);
   const patient = await assertPatientAccess(req.userProfile, body.patient_id);
-  const doctorId = body.doctor_id || patient.assigned_doctor_id;
+  const doctorId = body.doctor_id || patient.assigned_doctor_id || null;
 
-  if (!doctorId) throw httpError(400, 'doctor_id is required because patient has no assigned doctor');
-
-  const { data: existing, error: existingError } = await adminClient
-    .from('appointments')
-    .select('id')
-    .eq('doctor_id', doctorId)
-    .eq('appointment_date', body.appointment_date)
-    .eq('appointment_time', body.appointment_time)
-    .in('status', ['scheduled', 'confirmed']);
-  if (existingError) throw httpError(500, 'Unable to check appointment availability', existingError);
-  if (existing.length) throw httpError(409, 'This slot is already booked');
+  // Only check for slot conflicts when a specific doctor is involved — a null doctor_id
+  // would match ALL rows where doctor_id IS NULL, producing false conflicts.
+  if (doctorId) {
+    const { data: existing, error: existingError } = await adminClient
+      .from('appointments')
+      .select('id')
+      .eq('doctor_id', doctorId)
+      .eq('appointment_date', body.appointment_date)
+      .eq('appointment_time', body.appointment_time)
+      .in('status', ['scheduled', 'confirmed']);
+    if (existingError) throw httpError(500, 'Unable to check appointment availability', existingError);
+    if (existing && existing.length) throw httpError(409, 'This slot is already booked');
+  }
 
   const { data, error } = await adminClient
     .from('appointments')
     .insert({
-      ...body,
+      patient_id: patient.id,
       doctor_id: doctorId,
+      appointment_date: body.appointment_date,
+      appointment_time: body.appointment_time,
+      duration_minutes: body.duration_minutes || 30,
+      type: body.type || 'follow_up',
+      notes: body.notes || null,
       status: 'scheduled'
     })
     .select('*')
     .single();
   if (error) throw httpError(500, 'Unable to create appointment', error);
 
-  await adminClient.from('notifications').insert({
-    patient_id: patient.id,
-    doctor_id: doctorId,
-    type: 'appointment',
-    title: 'New appointment request',
-    message: `${body.type} appointment requested for ${body.appointment_date} at ${body.appointment_time}`,
-    priority: body.type === 'urgent' ? 'urgent' : 'normal'
-  });
+  // Only fire notification when a doctor is assigned
+  if (doctorId) {
+    await adminClient.from('notifications').insert({
+      patient_id: patient.id,
+      doctor_id: doctorId,
+      type: 'appointment',
+      title: 'New appointment request',
+      message: `${body.type} appointment requested for ${body.appointment_date} at ${body.appointment_time}`,
+      priority: body.type === 'urgent' ? 'urgent' : 'normal'
+    });
+  }
 
   res.status(201).json({ appointment: data });
 }
 
 async function listAppointments(req, res) {
   let query = adminClient.from('appointments').select('*').order('appointment_date', { ascending: true });
+
   if (req.userProfile.role === 'patient') {
     const patient = await getPatientForUser(req.userProfile.id);
     if (!patient) throw httpError(404, 'Patient profile not found');
     query = query.eq('patient_id', patient.id);
-  }
-  if (req.userProfile.role === 'doctor') {
+  } else if (req.userProfile.role === 'doctor') {
     const doctor = await getDoctorForUser(req.userProfile.id);
     if (!doctor) throw httpError(404, 'Doctor profile not found');
     query = query.eq('doctor_id', doctor.id);
   }
+  // admin role gets unfiltered list intentionally
   const { data, error } = await query;
   if (error) throw httpError(500, 'Unable to load appointments', error);
   res.json({ appointments: data });

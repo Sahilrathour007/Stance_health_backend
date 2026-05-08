@@ -39,7 +39,15 @@ async function getMyPatient(req, res) {
   if (appointmentError) throw httpError(500, 'Unable to load appointments', appointmentError);
   if (checkInError) throw httpError(500, 'Unable to load check-ins', checkInError);
 
-  res.json({ user: req.userProfile, patient, treatmentPlan, appointments: appointments || [], checkIns: checkIns || [] });
+  res.json({
+    user: req.userProfile,
+    patient,
+    treatmentPlan: treatmentPlan || null,
+    appointments: appointments || [],
+    upcomingAppointments: (appointments || []).filter(a => a.appointment_date >= new Date().toISOString().slice(0, 10)),
+    pastAppointments: (appointments || []).filter(a => a.appointment_date < new Date().toISOString().slice(0, 10)),
+    checkIns: checkIns || []
+  });
 }
 
 async function updatePatient(req, res) {
@@ -102,7 +110,7 @@ async function getNotifications(req, res) {
     .from('notifications')
     .select('*')
     .eq('patient_id', patient.id)
-    .order('sent_at', { ascending: false });
+    .order('created_at', { ascending: false });
   if (error) throw httpError(500, 'Unable to load notifications', error);
   res.json({ notifications: data });
 }
