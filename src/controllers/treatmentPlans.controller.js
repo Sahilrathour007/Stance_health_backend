@@ -22,6 +22,11 @@ const createPlanSchema = z.object({
   start_date: z.string().optional(),
   end_date: z.string().optional(),
   clinical_notes: z.string().optional(),
+  // Schedule fields — populated by the AI-draft suggest endpoint or set manually
+  sessions_per_week: z.number().int().min(1).max(7).optional(),
+  intensity: z.enum(['light', 'moderate', 'intensive']).optional(),
+  duration_weeks: z.number().int().positive().optional(),
+  rest_days: z.array(z.string()).default([]),
   // Draft is the only valid status on creation.
   // Use the dedicated activation endpoint (PUT /:id/activate) to go live.
   status: z.literal('draft').default('draft')
@@ -77,6 +82,10 @@ async function createTreatmentPlan(req, res) {
       clinical_notes: body.clinical_notes || null,
       start_date: body.start_date || null,
       end_date: body.end_date || null,
+      sessions_per_week: body.sessions_per_week || null,
+      intensity: body.intensity || null,
+      duration_weeks: body.duration_weeks || null,
+      rest_days: body.rest_days || [],
       status: 'draft'
     })
     .select('*')
@@ -217,9 +226,83 @@ async function listPatientPlans(req, res) {
   res.json({ treatmentPlans: data || [] });
 }
 
+/**
+ * POST /api/treatment-plans/suggest
+ * Returns a rule-based exercise suggestion for a patient's condition.
+ * NO database write — the doctor reviews and edits before saving.
+ * Keyed on pain_location + primary_cohort from the patient record.
+ */
+async function draftPlanFromPatient(req, res) {
+  const { patient_id } = req.body;
+  if (!patient_id) throw httpError(400, 'patient_id is required');
+
+  const patient = await assertPatientAccess(req.userProfile, patient_id);
+
+  // Pull condition signals from the patient record
+  const painLocation = (patient.pain_location || patient.primary_concern || '').toLowerCase();
+  const cohort = (patient.primary_cohort || patient.cohort || '').toLowerCase();
+  const painSeverity = parseFloat(patient.pain_severity || patient.current_pain || 5);
+
+  // Rule-based lookup: pain_location + cohort → exercise list + schedule
+  // Expand this table as more conditions are onboarded
+  const suggestionMap = {
+    back_corporate:      { exercises: ['Cat-Cow', 'Bird Dog', 'Dead Bug', 'Hip Flexor Stretch', 'Glute Bridge'], sessionsPerWeek: 3, intensity: 'moderate', durationWeeks: 8 },
+    back_athlete:        { exercises: ['Jefferson Curl', 'Romanian Deadlift', 'McGill Big 3', 'Pallof Press'], sessionsPerWeek: 4, intensity: 'intensive', durationWeeks: 10 },
+    back_senior:         { exercises: ['Seated Cat-Cow', 'Pelvic Tilt', 'Supine Knee Hug', 'Wall Angel'], sessionsPerWeek: 2, intensity: 'light', durationWeeks: 12 },
+    knee_corporate:      { exercises: ['Terminal Knee Extension', 'Step-Down', 'Wall Sit', 'Quad Set', 'SLR'], sessionsPerWeek: 3, intensity: 'moderate', durationWeeks: 8 },
+    knee_athlete:        { exercises: ['Single-Leg Squat', 'Nordic Hamstring Curl', 'Lateral Step-Down', 'VMO Lunge'], sessionsPerWeek: 4, intensity: 'intensive', durationWeeks: 12 },
+    knee_senior:         { exercises: ['Seated Leg Extension', 'Mini Squat', 'Step-Up (Low)', 'Heel Raise'], sessionsPerWeek: 2, intensity: 'light', durationWeeks: 10 },
+    shoulder_corporate:  { exercises: ['Pendulum', 'Scapular Retraction', 'External Rotation Band', 'Doorway Stretch'], sessionsPerWeek: 3, intensity: 'light', durationWeeks: 8 },
+    shoulder_athlete:    { exercises: ['Sleeper Stretch', 'YTW', 'Face Pull', 'Rotator Cuff Circuit'], sessionsPerWeek: 4, intensity: 'moderate', durationWeeks: 10 },
+    neck_corporate:      { exercises: ['Chin Tuck', 'Cervical Retraction', 'Upper Trap Stretch', 'Thoracic Extension'], sessionsPerWeek: 3, intensity: 'light', durationWeeks: 6 },
+    hip_corporate:       { exercises: ['Hip Flexor Stretch', '90/90 Hip Stretch', 'Clamshell', 'Side-Lying Hip Abduction'], sessionsPerWeek: 3, intensity: 'moderate', durationWeeks: 8 },
+    ankle_athlete:       { exercises: ['Single-Leg Balance', 'Calf Raise', 'Ankle Alphabet', 'Band Eversion'], sessionsPerWeek: 4, intensity: 'moderate', durationWeeks: 8 },
+  };
+
+  // Build lookup key: try specific match first, then fall back to pain_location alone
+  const locationKey = painLocation.includes('back') ? 'back'
+    : painLocation.includes('knee') ? 'knee'
+    : painLocation.includes('shoulder') ? 'shoulder'
+    : painLocation.includes('neck') || painLocation.includes('cervical') ? 'neck'
+    : painLocation.includes('hip') ? 'hip'
+    : painLocation.includes('ankle') || painLocation.includes('foot') ? 'ankle'
+    : 'back'; // default
+
+  const cohortKey = cohort.includes('sport') || cohort.includes('athlete') ? 'athlete'
+    : cohort.includes('senior') || cohort.includes('elder') ? 'senior'
+    : 'corporate'; // default
+
+  const key = `${locationKey}_${cohortKey}`;
+  const suggestion = suggestionMap[key] || suggestionMap['back_corporate'];
+
+  // Adjust intensity down if high pain severity (>= 7)
+  let intensity = suggestion.intensity;
+  if (painSeverity >= 7 && intensity === 'intensive') intensity = 'moderate';
+  if (painSeverity >= 8 && intensity === 'moderate') intensity = 'light';
+
+  const suggestedExercises = suggestion.exercises.map(name => ({
+    name,
+    sets: intensity === 'light' ? 2 : 3,
+    reps: intensity === 'intensive' ? 12 : 10,
+    frequency: `${suggestion.sessionsPerWeek}x per week`,
+    notes: ''
+  }));
+
+  res.json({
+    suggestedExercises,
+    suggestedSchedule: {
+      sessionsPerWeek: suggestion.sessionsPerWeek,
+      intensity,
+      durationWeeks: suggestion.durationWeeks
+    },
+    derivedFrom: { painLocation: locationKey, cohort: cohortKey, painSeverity }
+  });
+}
+
 module.exports = {
   createTreatmentPlan,
   updateTreatmentPlan,
   activatePlan,
-  listPatientPlans
+  listPatientPlans,
+  draftPlanFromPatient
 };

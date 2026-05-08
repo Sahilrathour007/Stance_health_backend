@@ -5,6 +5,10 @@ const controller = require('../controllers/treatmentPlans.controller');
 
 const router = express.Router();
 
+// NEW: AI-assist draft — returns suggested exercises + schedule, NO db write.
+// Must be declared before /:id routes to prevent Express matching 'suggest' as an id param.
+router.post('/suggest', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.draftPlanFromPatient));
+
 router.post('/', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.createTreatmentPlan));
 router.put('/:id', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.updateTreatmentPlan));
 
