@@ -231,6 +231,8 @@ async function listPatientPlans(req, res) {
  * Returns a rule-based exercise suggestion for a patient's condition.
  * NO database write — the doctor reviews and edits before saving.
  * Keyed on pain_location + primary_cohort from the patient record.
+ * Now lifestyle-aware: equipment_access, exercise_window, travel_frequency,
+ * behaviour_archetype all modify the base suggestion before returning.
  */
 async function draftPlanFromPatient(req, res) {
   const { patient_id } = req.body;
@@ -238,64 +240,158 @@ async function draftPlanFromPatient(req, res) {
 
   const patient = await assertPatientAccess(req.userProfile, patient_id);
 
-  // Pull condition signals from the patient record
+  // ── Condition signals ──────────────────────────────────────────────────────
   const painLocation = (patient.pain_location || patient.primary_concern || '').toLowerCase();
-  const cohort = (patient.primary_cohort || patient.cohort || '').toLowerCase();
+  const cohort       = (patient.primary_cohort || patient.cohort || '').toLowerCase();
   const painSeverity = parseFloat(patient.pain_severity || patient.current_pain || 5);
 
-  // Rule-based lookup: pain_location + cohort → exercise list + schedule
-  // Expand this table as more conditions are onboarded
+  // ── Lifestyle signals ──────────────────────────────────────────────────────
+  const archetype       = (patient.behaviour_archetype   || '').toLowerCase();
+  const equipmentAccess = (patient.equipment_access      || '').toLowerCase();
+  const exerciseWindow  = (patient.exercise_window       || '').toLowerCase();
+  const travelFrequency = (patient.travel_frequency      || '').toLowerCase();
+  const treatmentGoals  = (patient.treatment_goals       || '').toLowerCase();
+
+  // ── Base suggestion map ────────────────────────────────────────────────────
   const suggestionMap = {
-    back_corporate:      { exercises: ['Cat-Cow', 'Bird Dog', 'Dead Bug', 'Hip Flexor Stretch', 'Glute Bridge'], sessionsPerWeek: 3, intensity: 'moderate', durationWeeks: 8 },
-    back_athlete:        { exercises: ['Jefferson Curl', 'Romanian Deadlift', 'McGill Big 3', 'Pallof Press'], sessionsPerWeek: 4, intensity: 'intensive', durationWeeks: 10 },
-    back_senior:         { exercises: ['Seated Cat-Cow', 'Pelvic Tilt', 'Supine Knee Hug', 'Wall Angel'], sessionsPerWeek: 2, intensity: 'light', durationWeeks: 12 },
-    knee_corporate:      { exercises: ['Terminal Knee Extension', 'Step-Down', 'Wall Sit', 'Quad Set', 'SLR'], sessionsPerWeek: 3, intensity: 'moderate', durationWeeks: 8 },
-    knee_athlete:        { exercises: ['Single-Leg Squat', 'Nordic Hamstring Curl', 'Lateral Step-Down', 'VMO Lunge'], sessionsPerWeek: 4, intensity: 'intensive', durationWeeks: 12 },
-    knee_senior:         { exercises: ['Seated Leg Extension', 'Mini Squat', 'Step-Up (Low)', 'Heel Raise'], sessionsPerWeek: 2, intensity: 'light', durationWeeks: 10 },
-    shoulder_corporate:  { exercises: ['Pendulum', 'Scapular Retraction', 'External Rotation Band', 'Doorway Stretch'], sessionsPerWeek: 3, intensity: 'light', durationWeeks: 8 },
-    shoulder_athlete:    { exercises: ['Sleeper Stretch', 'YTW', 'Face Pull', 'Rotator Cuff Circuit'], sessionsPerWeek: 4, intensity: 'moderate', durationWeeks: 10 },
-    neck_corporate:      { exercises: ['Chin Tuck', 'Cervical Retraction', 'Upper Trap Stretch', 'Thoracic Extension'], sessionsPerWeek: 3, intensity: 'light', durationWeeks: 6 },
-    hip_corporate:       { exercises: ['Hip Flexor Stretch', '90/90 Hip Stretch', 'Clamshell', 'Side-Lying Hip Abduction'], sessionsPerWeek: 3, intensity: 'moderate', durationWeeks: 8 },
-    ankle_athlete:       { exercises: ['Single-Leg Balance', 'Calf Raise', 'Ankle Alphabet', 'Band Eversion'], sessionsPerWeek: 4, intensity: 'moderate', durationWeeks: 8 },
+    back_corporate:      { exercises: ['Cat-Cow', 'Bird Dog', 'Dead Bug', 'Hip Flexor Stretch', 'Glute Bridge'],              sessionsPerWeek: 3, intensity: 'moderate',  durationWeeks: 8  },
+    back_athlete:        { exercises: ['Jefferson Curl', 'Romanian Deadlift', 'McGill Big 3', 'Pallof Press'],                sessionsPerWeek: 4, intensity: 'intensive', durationWeeks: 10 },
+    back_senior:         { exercises: ['Seated Cat-Cow', 'Pelvic Tilt', 'Supine Knee Hug', 'Wall Angel'],                    sessionsPerWeek: 2, intensity: 'light',     durationWeeks: 12 },
+    knee_corporate:      { exercises: ['Terminal Knee Extension', 'Step-Down', 'Wall Sit', 'Quad Set', 'SLR'],               sessionsPerWeek: 3, intensity: 'moderate',  durationWeeks: 8  },
+    knee_athlete:        { exercises: ['Single-Leg Squat', 'Nordic Hamstring Curl', 'Lateral Step-Down', 'VMO Lunge'],       sessionsPerWeek: 4, intensity: 'intensive', durationWeeks: 12 },
+    knee_senior:         { exercises: ['Seated Leg Extension', 'Mini Squat', 'Step-Up (Low)', 'Heel Raise'],                 sessionsPerWeek: 2, intensity: 'light',     durationWeeks: 10 },
+    shoulder_corporate:  { exercises: ['Pendulum', 'Scapular Retraction', 'External Rotation Band', 'Doorway Stretch'],      sessionsPerWeek: 3, intensity: 'light',     durationWeeks: 8  },
+    shoulder_athlete:    { exercises: ['Sleeper Stretch', 'YTW', 'Face Pull', 'Rotator Cuff Circuit'],                       sessionsPerWeek: 4, intensity: 'moderate',  durationWeeks: 10 },
+    neck_corporate:      { exercises: ['Chin Tuck', 'Cervical Retraction', 'Upper Trap Stretch', 'Thoracic Extension'],      sessionsPerWeek: 3, intensity: 'light',     durationWeeks: 6  },
+    hip_corporate:       { exercises: ['Hip Flexor Stretch', '90/90 Hip Stretch', 'Clamshell', 'Side-Lying Hip Abduction'],  sessionsPerWeek: 3, intensity: 'moderate',  durationWeeks: 8  },
+    ankle_athlete:       { exercises: ['Single-Leg Balance', 'Calf Raise', 'Ankle Alphabet', 'Band Eversion'],               sessionsPerWeek: 4, intensity: 'moderate',  durationWeeks: 8  },
   };
 
-  // Build lookup key: try specific match first, then fall back to pain_location alone
-  const locationKey = painLocation.includes('back') ? 'back'
-    : painLocation.includes('knee') ? 'knee'
-    : painLocation.includes('shoulder') ? 'shoulder'
+  // Bodyweight-safe alternatives for patients with no gym access
+  const bodyweightAlternatives = {
+    back:     ['Dead Bug', 'Glute Bridge', 'Bird Dog', 'Pelvic Tilt', 'Knee-to-Chest Stretch'],
+    knee:     ['Wall Sit', 'Straight Leg Raise', 'Quad Set', 'Step-Up (bodyweight)', 'Heel Raise'],
+    shoulder: ['Wall Slide', 'Doorway Stretch', 'Scapular Retraction', 'Prone Y/T/W'],
+    neck:     ['Chin Tuck', 'Upper Trap Stretch', 'Cervical Retraction', 'Thoracic Extension on Floor'],
+    hip:      ['Hip Flexor Stretch', 'Clamshell', '90/90 Hip Stretch', 'Side-Lying Hip Abduction'],
+    ankle:    ['Single-Leg Balance', 'Ankle Alphabet', 'Seated Calf Raise', 'Towel Toe Curl'],
+  };
+
+  // Exercises that require gym equipment and should be filtered out if no access
+  const gymOnlyExercises = new Set([
+    'Romanian Deadlift', 'Jefferson Curl', 'Nordic Hamstring Curl', 'Pallof Press',
+    'Lateral Step-Down', 'VMO Lunge', 'Rotator Cuff Circuit', 'Face Pull',
+    'External Rotation Band', 'Band Eversion',
+  ]);
+
+  // ── Key resolution ─────────────────────────────────────────────────────────
+  const locationKey = painLocation.includes('back')    ? 'back'
+    : painLocation.includes('knee')                    ? 'knee'
+    : painLocation.includes('shoulder')                ? 'shoulder'
     : painLocation.includes('neck') || painLocation.includes('cervical') ? 'neck'
-    : painLocation.includes('hip') ? 'hip'
-    : painLocation.includes('ankle') || painLocation.includes('foot') ? 'ankle'
-    : 'back'; // default
+    : painLocation.includes('hip')                     ? 'hip'
+    : painLocation.includes('ankle') || painLocation.includes('foot')    ? 'ankle'
+    : 'back';
 
   const cohortKey = cohort.includes('sport') || cohort.includes('athlete') ? 'athlete'
-    : cohort.includes('senior') || cohort.includes('elder') ? 'senior'
-    : 'corporate'; // default
+    : cohort.includes('senior') || cohort.includes('elder')                ? 'senior'
+    : 'corporate';
 
   const key = `${locationKey}_${cohortKey}`;
-  const suggestion = suggestionMap[key] || suggestionMap['back_corporate'];
+  // Deep-clone so we don't mutate the map
+  const base       = suggestionMap[key] || suggestionMap['back_corporate'];
+  let exercises    = [...base.exercises];
+  let sessionsPerWeek = base.sessionsPerWeek;
+  let intensity    = base.intensity;
+  let durationWeeks = base.durationWeeks;
 
-  // Adjust intensity down if high pain severity (>= 7)
-  let intensity = suggestion.intensity;
+  // ── Severity adjustment ────────────────────────────────────────────────────
   if (painSeverity >= 7 && intensity === 'intensive') intensity = 'moderate';
-  if (painSeverity >= 8 && intensity === 'moderate') intensity = 'light';
+  if (painSeverity >= 8 && intensity === 'moderate')  intensity = 'light';
 
-  const suggestedExercises = suggestion.exercises.map(name => ({
-    name,
-    sets: intensity === 'light' ? 2 : 3,
-    reps: intensity === 'intensive' ? 12 : 10,
-    frequency: `${suggestion.sessionsPerWeek}x per week`,
-    notes: ''
-  }));
+  // ── Lifestyle adaptations (tracked for response transparency) ─────────────
+  const lifestyleAdaptations = [];
+
+  // 1. Equipment — no gym → replace gym-only moves with bodyweight alternatives
+  const noGymAccess = equipmentAccess.includes('no equipment')
+    || equipmentAccess.includes('home')
+    || equipmentAccess.includes('bodyweight');
+
+  if (noGymAccess) {
+    const filtered = exercises.filter(ex => !gymOnlyExercises.has(ex));
+    const removed   = exercises.filter(ex => gymOnlyExercises.has(ex));
+    const alts      = (bodyweightAlternatives[locationKey] || []).filter(a => !filtered.includes(a));
+    exercises = [...filtered, ...alts.slice(0, removed.length)];
+    if (removed.length) {
+      lifestyleAdaptations.push(`Equipment: replaced ${removed.length} gym-only exercise(s) with bodyweight alternatives (${equipmentAccess})`);
+    }
+  }
+
+  // 2. Travel — frequent travellers can't maintain high session frequency
+  const isFrequentTraveller = travelFrequency.includes('frequent')
+    || travelFrequency.includes('2x')
+    || travelFrequency.includes('weekly');
+
+  if (isFrequentTraveller && sessionsPerWeek > 3) {
+    sessionsPerWeek = Math.min(sessionsPerWeek, 3);
+    lifestyleAdaptations.push(`Travel: sessions/week capped at 3 due to frequent travel (${travelFrequency})`);
+  }
+
+  // 3. Behaviour archetype — Overdoer gets hard load caps on every exercise note
+  const isOverdoer = archetype.includes('overdoer') || archetype.includes('over-doer');
+  const isAvoider  = archetype.includes('avoider');
+
+  if (isOverdoer) {
+    lifestyleAdaptations.push('Archetype (Overdoer): load-cap warning added to all exercise notes');
+  }
+  if (isAvoider && intensity === 'light') {
+    // Avoiders need extra motivation scaffolding, not just light load
+    lifestyleAdaptations.push('Archetype (Avoider): progressive difficulty noted — start minimum viable, build week-on-week');
+  }
+
+  // 4. Exercise window — evening-only → consolidate rest days to avoid thin spread
+  const eveningOnly = exerciseWindow.includes('evening') || exerciseWindow.includes('night');
+  let restDays = [];
+  if (eveningOnly && sessionsPerWeek <= 3) {
+    restDays = ['Sunday', 'Wednesday'];
+    lifestyleAdaptations.push('Exercise window (evening-only): rest days set to Wed + Sun to consolidate sessions');
+  }
+
+  // ── Build final exercise objects ───────────────────────────────────────────
+  const suggestedExercises = exercises.map(name => {
+    let notes = '';
+    if (isOverdoer) {
+      notes = 'LOAD CAP: Do NOT increase load without clinical sign-off. Stop if pain > 3/10.';
+    } else if (isAvoider) {
+      notes = 'Start with minimum reps. Progress by 1 rep/set each week if pain-free.';
+    }
+    return {
+      name,
+      sets:      intensity === 'light' ? 2 : 3,
+      reps:      intensity === 'intensive' ? 12 : 10,
+      frequency: `${sessionsPerWeek}x per week`,
+      notes
+    };
+  });
 
   res.json({
     suggestedExercises,
     suggestedSchedule: {
-      sessionsPerWeek: suggestion.sessionsPerWeek,
+      sessionsPerWeek,
       intensity,
-      durationWeeks: suggestion.durationWeeks
+      durationWeeks,
+      restDays
     },
-    derivedFrom: { painLocation: locationKey, cohort: cohortKey, painSeverity }
+    lifestyleAdaptations,
+    derivedFrom: {
+      painLocation: locationKey,
+      cohort: cohortKey,
+      painSeverity,
+      equipmentAccess: equipmentAccess || null,
+      exerciseWindow:  exerciseWindow  || null,
+      travelFrequency: travelFrequency || null,
+      behaviourArchetype: archetype    || null,
+    }
   });
 }
 
