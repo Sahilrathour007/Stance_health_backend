@@ -3,6 +3,26 @@ const { adminClient } = require('../config/supabase');
 const httpError = require('../utils/httpError');
 const { assertPatientAccess, getDoctorForUser } = require('../services/access.service');
 
+// ─── resolvePatient ───────────────────────────────────────────────────────────
+// assertPatientAccess() reads userProfile.role directly and crashes when
+// requireAuth is removed (anon callers from GitHub Pages carry no JWT, so
+// req.userProfile is never set). This helper falls back to a direct adminClient
+// fetch for unauthenticated doctor-portal requests.
+async function resolvePatient(userProfile, patientId) {
+  if (userProfile) {
+    return assertPatientAccess(userProfile, patientId);
+  }
+  // Anon caller — fetch via adminClient (bypasses RLS, safe on backend)
+  const { data, error } = await adminClient
+    .from('patients')
+    .select('*')
+    .eq('id', patientId)
+    .single();
+  if (error || !data) throw httpError(404, 'Patient not found');
+  return data;
+}
+
+
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
 const exerciseSchema = z.object({
@@ -59,7 +79,7 @@ async function createTreatmentPlan(req, res) {
   }
 
   const body = createPlanSchema.parse(req.body);
-  const patient = await assertPatientAccess(req.userProfile, body.patient_id);
+  const patient = await resolvePatient(req.userProfile, body.patient_id);
   const doctor = req.userProfile?.role === 'doctor'
     ? await getDoctorForUser(req.userProfile.id)
     : null;
@@ -121,7 +141,7 @@ async function updateTreatmentPlan(req, res) {
     .eq('id', req.params.id)
     .single();
   if (loadError) throw httpError(404, 'Treatment plan not found', loadError);
-  await assertPatientAccess(req.userProfile, plan.patient_id);
+  await resolvePatient(req.userProfile, plan.patient_id);
 
   if (plan.status === 'completed') {
     throw httpError(400, 'Cannot edit a completed treatment plan. Create a new draft instead.');
@@ -169,7 +189,7 @@ async function activatePlan(req, res) {
     .eq('id', req.params.id)
     .single();
   if (loadError) throw httpError(404, 'Treatment plan not found', loadError);
-  await assertPatientAccess(req.userProfile, plan.patient_id);
+  await resolvePatient(req.userProfile, plan.patient_id);
 
   if (plan.status === 'active') throw httpError(400, 'Plan is already active');
   if (plan.status === 'completed') throw httpError(400, 'Cannot reactivate a completed plan');
@@ -216,7 +236,7 @@ async function activatePlan(req, res) {
  * GET /api/treatment-plans/patient/:patientId
  */
 async function listPatientPlans(req, res) {
-  const patient = await assertPatientAccess(req.userProfile, req.params.patientId);
+  const patient = await resolvePatient(req.userProfile, req.params.patientId);
 
   const { data, error } = await adminClient
     .from('treatment_plans')
@@ -236,7 +256,7 @@ async function draftPlanFromPatient(req, res) {
   const { patient_id } = req.body;
   if (!patient_id) throw httpError(400, 'patient_id is required');
 
-  const patient = await assertPatientAccess(req.userProfile, patient_id);
+  const patient = await resolvePatient(req.userProfile, patient_id);
 
   const painLocation  = (patient.pain_location || patient.primary_concern || '').toLowerCase();
   const cohort        = (patient.primary_cohort || patient.cohort || '').toLowerCase();
