@@ -35,7 +35,10 @@ async function getMyPatient(req, res) {
     { data: checkIns, error: checkInError },
     { data: doctor, error: doctorError }
   ] = await Promise.all([
-    adminClient.from('treatment_plans').select('*').eq('patient_id', patient.id).maybeSingle(),
+    // FIX: must filter by status='active' — without this, a draft plan is
+    // returned first and the frontend sees status !== 'active', so exercises
+    // never render even after the doctor clicks Activate.
+    adminClient.from('treatment_plans').select('*').eq('patient_id', patient.id).eq('status', 'active').order('activated_at', { ascending: false }).limit(1).maybeSingle(),
     adminClient.from('appointments').select('*').eq('patient_id', patient.id).order('appointment_date', { ascending: true }),
     adminClient.from('check_ins').select('*').eq('patient_id', patient.id).order('submitted_at', { ascending: false }).limit(20),
     patient.assigned_doctor_id
