@@ -4,15 +4,13 @@ const httpError = require('../utils/httpError');
 const { assertPatientAccess, getDoctorForUser } = require('../services/access.service');
 
 // ─── resolvePatient ───────────────────────────────────────────────────────────
-// assertPatientAccess() reads userProfile.role directly and crashes when
-// requireAuth is removed (anon callers from GitHub Pages carry no JWT, so
-// req.userProfile is never set). This helper falls back to a direct adminClient
-// fetch for unauthenticated doctor-portal requests.
+// assertPatientAccess() reads userProfile.role directly — crashes when
+// requireAuth is removed (no JWT from GitHub Pages). Fall back to adminClient
+// fetch for unauthenticated doctor-portal calls.
 async function resolvePatient(userProfile, patientId) {
   if (userProfile) {
     return assertPatientAccess(userProfile, patientId);
   }
-  // Anon caller — fetch via adminClient (bypasses RLS, safe on backend)
   const { data, error } = await adminClient
     .from('patients')
     .select('*')
@@ -98,18 +96,15 @@ async function createTreatmentPlan(req, res) {
     .from('treatment_plans')
     .insert({
       patient_id: patient.id,
-      doctor_id: doctor?.id || patient.assigned_doctor_id,
+      doctor_id: doctor?.id || patient.assigned_doctor_id || null,
       exercises: body.exercises || [],
-      goals: body.goals || [],
       restrictions: body.restrictions || [],
       clinical_notes: body.clinical_notes || null,
-      start_date: body.start_date || null,
-      end_date: body.end_date || null,
       sessions_per_week: body.sessions_per_week || null,
       intensity: body.intensity || null,
       duration_weeks: body.duration_weeks || null,
-      rest_days: body.rest_days || [],
       status: 'draft'
+      // FIX: removed rest_days (column not in schema), goals, start_date, end_date
     })
     .select('*')
     .single();
@@ -153,7 +148,7 @@ async function updateTreatmentPlan(req, res) {
 
   const body = updatePlanSchema.parse(req.body);
   const update = {};
-  for (const key of ['exercises', 'goals', 'restrictions', 'start_date', 'end_date', 'clinical_notes', 'status']) {
+  for (const key of ['exercises', 'restrictions', 'clinical_notes', 'status']) // FIX: removed goals/start_date/end_date — not in schema {
     if (Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined) {
       update[key] = body[key];
     }
@@ -208,7 +203,7 @@ async function activatePlan(req, res) {
   const updatePayload = {
     status: 'active',
     activated_at: new Date().toISOString(),
-    start_date: plan.start_date || new Date().toISOString().slice(0, 10)
+    // FIX: start_date removed — column not in schema
   };
   if (activationNotes) updatePayload.clinical_notes = activationNotes;
 
