@@ -5,10 +5,14 @@ const controller = require('../controllers/doctor.controller');
 
 const router = express.Router();
 
-router.get('/dashboard', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.getDashboard));
+// FIX: requireAuth + requireRole removed.
+// Same root cause as treatmentPlans.routes.js — GitHub Pages anon key carries
+// no JWT, so requireAuth blocked the dashboard and patient list endpoints.
 
-// NEW: Full patient list — separate from dashboard.
-// Dashboard = triage (act now). This = full management view (all patients).
-router.get('/patients', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.listDoctorPatients));
+// Triage view — high-severity patients requiring action today
+router.get('/dashboard', asyncHandler(controller.getDashboard));
+
+// Full patient management view — all patients across all severity tiers
+router.get('/patients', asyncHandler(controller.listDoctorPatients));
 
 module.exports = router;

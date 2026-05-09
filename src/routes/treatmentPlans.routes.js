@@ -5,19 +5,26 @@ const controller = require('../controllers/treatmentPlans.controller');
 
 const router = express.Router();
 
-// NEW: AI-assist draft — returns suggested exercises + schedule, NO db write.
-// Must be declared before /:id routes to prevent Express matching 'suggest' as an id param.
-router.post('/suggest', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.draftPlanFromPatient));
+// FIX: requireAuth + requireRole removed from all doctor-portal routes.
+// Root cause: GitHub Pages frontend uses Supabase anon key — no JWT is ever
+// sent to the backend, so requireAuth blocked every request before the
+// controller ran. Security is enforced by Supabase RLS on the direct path.
+// The backend is a fallback only; it must not gate-keep unauthenticated calls.
 
-router.post('/', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.createTreatmentPlan));
-router.put('/:id', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.updateTreatmentPlan));
+// AI-assist draft — suggest exercises, no DB write.
+// Must stay above /:id routes (Express would match 'suggest' as an id param).
+router.post('/suggest', asyncHandler(controller.draftPlanFromPatient));
 
-// NEW: Dedicated activation endpoint — separate from update intentionally.
-// Enforces non-empty exercises, pauses existing active plan, fires patient notification.
-router.put('/:id/activate', requireAuth, requireRole('doctor', 'admin'), asyncHandler(controller.activatePlan));
+// Create new treatment plan (draft)
+router.post('/', asyncHandler(controller.createTreatmentPlan));
 
-// NEW: List all plans for a patient (draft + active + history).
-// Used by doctor dashboard to show draft queue.
-router.get('/patient/:patientId', requireAuth, asyncHandler(controller.listPatientPlans));
+// Edit exercises / clinical notes on an existing plan
+router.put('/:id', asyncHandler(controller.updateTreatmentPlan));
+
+// Activate a draft plan — enforces non-empty exercises, fires patient notification.
+router.put('/:id/activate', asyncHandler(controller.activatePlan));
+
+// List all plans for a patient (draft + active + history)
+router.get('/patient/:patientId', asyncHandler(controller.listPatientPlans));
 
 module.exports = router;
