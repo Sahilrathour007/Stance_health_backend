@@ -3,24 +3,6 @@ const { adminClient } = require('../config/supabase');
 const httpError = require('../utils/httpError');
 const { assertPatientAccess, getDoctorForUser } = require('../services/access.service');
 
-// ─── resolvePatient ───────────────────────────────────────────────────────────
-// assertPatientAccess() reads userProfile.role directly — crashes when
-// requireAuth is removed (no JWT from GitHub Pages). Fall back to adminClient
-// fetch for unauthenticated doctor-portal calls.
-async function resolvePatient(userProfile, patientId) {
-  if (userProfile) {
-    return assertPatientAccess(userProfile, patientId);
-  }
-  const { data, error } = await adminClient
-    .from('patients')
-    .select('*')
-    .eq('id', patientId)
-    .single();
-  if (error || !data) throw httpError(404, 'Patient not found');
-  return data;
-}
-
-
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
 const exerciseSchema = z.object({
@@ -59,6 +41,24 @@ const updatePlanSchema = z.object({
 });
 
 // ─── Controllers ─────────────────────────────────────────────────────────────
+// ─── resolvePatient ─────────────────────────────────────────────────────────
+// Wraps assertPatientAccess so unauthenticated anon callers (GitHub Pages)
+// don't crash the controller. requireAuth is removed from routes, so
+// req.userProfile is undefined for those calls.
+async function resolvePatient(userProfile, patientId) {
+  if (userProfile) {
+    return assertPatientAccess(userProfile, patientId);
+  }
+  // Anon path — fetch directly via adminClient (bypasses RLS safely)
+  const { data, error } = await adminClient
+    .from('patients')
+    .select('*')
+    .eq('id', patientId)
+    .single();
+  if (error || !data) throw httpError(404, 'Patient not found');
+  return data;
+}
+
 
 /**
  * POST /api/treatment-plans
@@ -98,13 +98,14 @@ async function createTreatmentPlan(req, res) {
       patient_id: patient.id,
       doctor_id: doctor?.id || patient.assigned_doctor_id || null,
       exercises: body.exercises || [],
+      goals: body.goals || [],
       restrictions: body.restrictions || [],
       clinical_notes: body.clinical_notes || null,
       sessions_per_week: body.sessions_per_week || null,
       intensity: body.intensity || null,
       duration_weeks: body.duration_weeks || null,
       status: 'draft'
-      // FIX: removed rest_days (column not in schema), goals, start_date, end_date
+      // FIX: rest_days removed — add column via SQL migration if needed
     })
     .select('*')
     .single();
@@ -148,7 +149,7 @@ async function updateTreatmentPlan(req, res) {
 
   const body = updatePlanSchema.parse(req.body);
   const update = {};
-  for (const key of ['exercises', 'restrictions', 'clinical_notes', 'status']) // FIX: removed goals/start_date/end_date — not in schema {
+  for (const key of ['exercises', 'goals', 'restrictions', 'start_date', 'end_date', 'clinical_notes', 'status']) {
     if (Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined) {
       update[key] = body[key];
     }
@@ -203,7 +204,7 @@ async function activatePlan(req, res) {
   const updatePayload = {
     status: 'active',
     activated_at: new Date().toISOString(),
-    // FIX: start_date removed — column not in schema
+    start_date: plan.start_date || new Date().toISOString().slice(0, 10)
   };
   if (activationNotes) updatePayload.clinical_notes = activationNotes;
 
