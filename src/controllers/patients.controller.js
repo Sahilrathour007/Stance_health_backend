@@ -29,11 +29,15 @@ async function getMyPatient(req, res) {
   const patient = await getPatientForUser(req.userProfile.id);
   if (!patient) throw httpError(404, 'Patient profile not found');
 
+  const today = new Date().toISOString().slice(0, 10);
+
   const [
     { data: treatmentPlan, error: planError },
     { data: appointments, error: appointmentError },
     { data: checkIns, error: checkInError },
-    { data: doctor, error: doctorError }
+    { data: doctor, error: doctorError },
+    { data: patientMetrics, error: metricsError },
+    { data: todayProgress, error: todayError }
   ] = await Promise.all([
     // FIX: must filter by status='active' — without this, a draft plan is
     // returned first and the frontend sees status !== 'active', so exercises
@@ -43,13 +47,22 @@ async function getMyPatient(req, res) {
     adminClient.from('check_ins').select('*').eq('patient_id', patient.id).order('submitted_at', { ascending: false }).limit(20),
     patient.assigned_doctor_id
       ? adminClient.from('doctors').select('id, specialty, users(name,email,phone)').eq('id', patient.assigned_doctor_id).maybeSingle()
-      : Promise.resolve({ data: null, error: null })
+      : Promise.resolve({ data: null, error: null }),
+    // Weekly aggregates — read-only. Written by DB trigger when daily_patient_progress inserts.
+    adminClient.from('patient_metrics').select('*').eq('patient_id', patient.id).order('week_number', { ascending: false }).limit(12),
+    // Today's daily progress — tells frontend if patient already submitted today
+    adminClient.from('daily_patient_progress').select('exercises_completed,exercises_total,pain_level,confidence,submitted_at').eq('patient_id', patient.id).eq('date', today).maybeSingle()
   ]);
 
   if (planError) throw httpError(500, 'Unable to load treatment plan', planError);
   if (appointmentError) throw httpError(500, 'Unable to load appointments', appointmentError);
   if (checkInError) throw httpError(500, 'Unable to load check-ins', checkInError);
   if (doctorError) throw httpError(500, 'Unable to load assigned doctor', doctorError);
+  if (metricsError) throw httpError(500, 'Unable to load patient metrics', metricsError);
+  // todayError is non-fatal — patient may not have submitted yet today
+  if (todayError && todayError.code !== 'PGRST116') {
+    console.warn('daily_patient_progress fetch warning:', todayError.message);
+  }
 
   res.json({
     user: req.userProfile,
@@ -63,9 +76,11 @@ async function getMyPatient(req, res) {
     } : null,
     treatmentPlan: treatmentPlan || null,
     appointments: appointments || [],
-    upcomingAppointments: (appointments || []).filter(a => a.appointment_date >= new Date().toISOString().slice(0, 10)),
-    pastAppointments: (appointments || []).filter(a => a.appointment_date < new Date().toISOString().slice(0, 10)),
-    checkIns: checkIns || []
+    upcomingAppointments: (appointments || []).filter(a => a.appointment_date >= today),
+    pastAppointments: (appointments || []).filter(a => a.appointment_date < today),
+    checkIns: checkIns || [],
+    patientMetrics: patientMetrics || [],   // weekly aggregates for progress chart
+    todayProgress: todayProgress || null    // null = not submitted yet today
   });
 }
 
